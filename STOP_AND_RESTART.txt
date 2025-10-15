@@ -1,0 +1,19 @@
+⚠️ IMPORTANT: YOU MUST RESTART THE SERVER ⚠️
+
+The code has been fixed, but your server is still running the OLD code.
+
+STEPS TO FIX:
+
+1. Go to the terminal where the server is running
+2. Press: Ctrl + C (to stop the server)
+3. Run: node index.js (to start it again)
+4. Wait for: "Server listening at http://localhost:3000"
+5. In ANOTHER terminal, run: node test-ai-market-questions.js
+
+WHY?
+Node.js loads code into memory when it starts. Changes to files
+don't take effect until you restart the server.
+
+QUICK FIX:
+Terminal 1: Ctrl+C, then: node index.js
+Terminal 2: node test-ai-market-questions.js
