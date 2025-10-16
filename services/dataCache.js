@@ -1,20 +1,20 @@
 import CachedData from '../model/CachedData.js';
 
 class DataCacheService {
-  // Check if data needs refresh (older than 30 minutes)
-  static async shouldRefresh(userId, dataType, startDate, endDate) {
+  // Check if data needs refresh (configurable cache duration)
+  static async shouldRefresh(userId, dataType, startDate, endDate, cacheMinutes = 30) {
     const cached = await CachedData.findOne({
       userId,
       dataType,
       'dateRange.startDate': startDate,
       'dateRange.endDate': endDate,
       syncStatus: 'success'
-    }).sort({ lastSyncedAt: -1 });
+    }).sort({ lastSyncedAt: -1 }).lean();
 
     if (!cached) return true;
 
     const age = Date.now() - new Date(cached.lastSyncedAt).getTime();
-    return age > 30 * 60 * 1000; // 30 minutes
+    return age > cacheMinutes * 60 * 1000;
   }
 
   // Get cached data

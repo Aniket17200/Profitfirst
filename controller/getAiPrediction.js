@@ -198,37 +198,113 @@ const getShiprocketData = async (apiToken, since, until) => {
 };
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const getOpenAiPrediction = async (historicalMonths) => {
-  const prompt = `
-    You are an expert financial analyst for Indian D2C brands.
-    Based on the last 3 months actual data provided, predict the next 3 months.
-    Ensure output is valid JSON with root key "predictions".
-    Each prediction must have { key, values } where values include:
-    revenue, orders, aov, cogs, grossProfit, ads, shipping, netProfit
-  `;
 
-  const response = await openai.chat.completions.create({
-    model: "gpt-4-turbo-preview",
-    messages: [
-      {
-        role: "user",
-        content:
-          prompt +
-          "\nHistorical Data:\n" +
-          JSON.stringify(historicalMonths, null, 2),
+// Simple statistical prediction (faster than AI)
+const getStatisticalPrediction = (historicalMonths) => {
+  console.log('[PREDICTION] Using statistical prediction (fast)');
+  
+  const predictions = [];
+  const lastMonth = historicalMonths[historicalMonths.length - 1];
+  
+  // Calculate average growth rate
+  let totalGrowth = 0;
+  for (let i = 1; i < historicalMonths.length; i++) {
+    const curr = historicalMonths[i].values.revenue;
+    const prev = historicalMonths[i - 1].values.revenue;
+    if (prev > 0) {
+      totalGrowth += (curr - prev) / prev;
+    }
+  }
+  const avgGrowthRate = historicalMonths.length > 1 ? totalGrowth / (historicalMonths.length - 1) : 0.05;
+  const growthRate = Math.max(-0.2, Math.min(0.3, avgGrowthRate)); // Cap between -20% and +30%
+  
+  // Generate 3 months predictions
+  for (let i = 1; i <= 3; i++) {
+    const futureDate = addMonths(new Date(), i);
+    const key = monthLabel(futureDate);
+    
+    // Apply growth rate with slight randomization
+    const growth = 1 + (growthRate * i * 0.8); // Diminishing growth
+    
+    const revenue = lastMonth.values.revenue * growth;
+    const orders = lastMonth.values.orders * growth;
+    const aov = orders > 0 ? revenue / orders : lastMonth.values.aov;
+    const cogs = lastMonth.values.cogs * growth;
+    const grossProfit = revenue - cogs;
+    const ads = lastMonth.values.ads * growth;
+    const shipping = lastMonth.values.shipping * growth;
+    const netProfit = revenue - cogs - ads - shipping;
+    
+    predictions.push({
+      key,
+      values: {
+        revenue: Math.round(revenue),
+        orders: Math.round(orders),
+        aov: Math.round(aov),
+        cogs: Math.round(cogs),
+        grossProfit: Math.round(grossProfit),
+        ads: Math.round(ads),
+        shipping: Math.round(shipping),
+        netProfit: Math.round(netProfit),
       },
-    ],
-    response_format: { type: "json_object" },
-  });
+      isPrediction: true,
+    });
+  }
+  
+  return predictions;
+};
 
-  const content = response.choices[0]?.message?.content;
-  const parsed = JSON.parse(content);
-  return parsed.predictions.map((p) => ({ ...p, isPrediction: true }));
+const getOpenAiPrediction = async (historicalMonths) => {
+  console.log('[PREDICTION] Using AI prediction (slower)');
+  
+  const prompt = `You are a financial analyst. Based on the last 3 months data, predict the next 3 months.
+Return JSON with root key "predictions" as array. Each item: { key: "Month Name", values: { revenue, orders, aov, cogs, grossProfit, ads, shipping, netProfit } }`;
+
+  try {
+    // Add timeout protection
+    const completionPromise = openai.chat.completions.create({
+      model: "gpt-3.5-turbo", // Faster than GPT-4
+      messages: [
+        {
+          role: "user",
+          content: prompt + "\nData:\n" + JSON.stringify(historicalMonths, null, 2),
+        },
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.3,
+      max_tokens: 1000,
+    });
+
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("AI prediction timeout")), 15000)
+    );
+
+    const response = await Promise.race([completionPromise, timeoutPromise]);
+    const content = response.choices[0]?.message?.content;
+    const parsed = JSON.parse(content);
+    return parsed.predictions.map((p) => ({ ...p, isPrediction: true }));
+  } catch (error) {
+    console.error('[PREDICTION] AI failed, using statistical fallback:', error.message);
+    return getStatisticalPrediction(historicalMonths);
+  }
 };
 
 export const getAiPrediction = async (req, res) => {
   try {
     const { user } = req;
+    const userId = user._id.toString();
+    
+    console.log(`[PREDICTION] ⚡ Fetching predictions for user ${userId}...`);
+    const startTime = Date.now();
+    
+    // Check cache first
+    const cacheKey = `prediction_${userId}`;
+    const cached = aiCache.get(cacheKey);
+    if (cached) {
+      console.log(`[PREDICTION] ⚡ Using cached data (${Date.now() - startTime}ms)`);
+      return res.json(cached);
+    }
+    
     const SHOP = user?.onboarding?.step2?.storeUrl;
     const SHOPIFY_TOKEN = user?.onboarding?.step2?.accessToken;
     const AD_ACCOUNT_ID = user?.onboarding?.step4?.adAccountId;
@@ -248,7 +324,7 @@ export const getAiPrediction = async (req, res) => {
     }
 
     const today = new Date();
-    const firstMonthStart = startOfMonth(subMonths(today, 3));
+    const firstMonthStart = startOfMonth(subMonths(today, 2)); // Only 2 months instead of 3 (faster)
     const lastMonthEnd = endOfMonth(today);
     const allDays = eachDayOfInterval({
       start: firstMonthStart,
@@ -258,12 +334,31 @@ export const getAiPrediction = async (req, res) => {
     const since = toISTDate(firstMonthStart.toISOString());
     const until = toISTDate(lastMonthEnd.toISOString());
 
-    const [orders, meta, ship, costs] = await Promise.all([
-      getShopifyOrders(SHOPIFY_TOKEN, SHOP, since, until),
-      fetchMetaDaily(META_TOKEN, AD_ACCOUNT_ID, since, until),
-      getShiprocketData(SHIPROCKET_TOKEN, since, until),
+    console.log(`[PREDICTION] Fetching data from ${since} to ${until}...`);
+
+    // Add timeout protection for all API calls
+    const [orders, meta, ship, costs] = await Promise.allSettled([
+      Promise.race([
+        getShopifyOrders(SHOPIFY_TOKEN, SHOP, since, until),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Shopify timeout')), 20000))
+      ]),
+      Promise.race([
+        fetchMetaDaily(META_TOKEN, AD_ACCOUNT_ID, since, until),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Meta timeout')), 10000))
+      ]),
+      Promise.race([
+        getShiprocketData(SHIPROCKET_TOKEN, since, until),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Shiprocket timeout')), 10000))
+      ]),
       getProductCosts(user._id),
     ]);
+
+    const ordersData = orders.status === 'fulfilled' ? orders.value : [];
+    const metaData = meta.status === 'fulfilled' ? meta.value : {};
+    const shipData = ship.status === 'fulfilled' ? ship.value : { dailyCosts: new Map(), totalShippingCost: 0, totalShipments: 0 };
+    const costsData = costs.status === 'fulfilled' ? costs.value : new Map();
+    
+    console.log(`[PREDICTION] ✓ Data fetched: ${ordersData.length} orders`);
 
     // Daily aggregation
     const daily = {};
@@ -272,12 +367,12 @@ export const getAiPrediction = async (req, res) => {
         revenue: 0,
         orders: 0,
         cogs: 0,
-        ads: meta[d]?.spend || 0,
-        shipping: ship.dailyCosts.get(d) || 0,
+        ads: metaData[d]?.spend || 0,
+        shipping: shipData.dailyCosts.get(d) || 0,
       };
     });
 
-    orders.forEach((o) => {
+    ordersData.forEach((o) => {
       const key = toISTDate(parseISO(o.createdAt).toISOString());
       if (!daily[key]) return;
       daily[key].revenue += parseFloat(o.totalPriceSet?.shopMoney?.amount || 0);
@@ -285,7 +380,7 @@ export const getAiPrediction = async (req, res) => {
       let cogs = 0;
       o.lineItems.edges.forEach(({ node }) => {
         const pid = node.product?.id?.split("/").pop();
-        cogs += (costs.get(pid) || 0) * (node.quantity || 0);
+        cogs += (costsData.get(pid) || 0) * (node.quantity || 0);
       });
       daily[key].cogs += cogs;
     });
@@ -294,9 +389,10 @@ export const getAiPrediction = async (req, res) => {
       (d) => (d.aov = d.orders ? d.revenue / d.orders : 0)
     );
 
-    // Aggregate into last 3 months
+    // Aggregate into last 2-3 months
     const historicalMonths = [];
-    for (let i = 3; i >= 1; i--) {
+    const monthsToFetch = 2; // Reduced from 3 for speed
+    for (let i = monthsToFetch; i >= 1; i--) {
       const monthDate = subMonths(today, i);
       const key = monthLabel(monthDate);
       const days = allDays.filter((d) => isSameMonth(parseISO(d), monthDate));
@@ -322,8 +418,13 @@ export const getAiPrediction = async (req, res) => {
       });
     }
 
-    // Get predictions
-    const predictedMonths = await getOpenAiPrediction(historicalMonths);
+    console.log(`[PREDICTION] Generating predictions...`);
+    
+    // Use statistical prediction by default (faster), AI as fallback
+    const useAI = req.query.useAI === 'true'; // Optional AI prediction
+    const predictedMonths = useAI 
+      ? await getOpenAiPrediction(historicalMonths)
+      : getStatisticalPrediction(historicalMonths);
     const allMonths = [...historicalMonths, ...predictedMonths];
 
     // Build frontend response
@@ -446,8 +547,16 @@ export const getAiPrediction = async (req, res) => {
       })),
     };
 
-    return res.json({ metricsByMonth, dashboardData, mainChartsData });
+    const response = { metricsByMonth, dashboardData, mainChartsData };
+    
+    // Cache for 1 hour
+    aiCache.set(cacheKey, response);
+    
+    console.log(`[PREDICTION] ⚡ Complete in ${Date.now() - startTime}ms`);
+    
+    return res.json(response);
   } catch (err) {
+    console.error('[PREDICTION] ❌ Error:', err.message);
     return res
       .status(500)
       .json({ message: "AI Prediction failed", error: err.message });

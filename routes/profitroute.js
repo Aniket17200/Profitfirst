@@ -29,6 +29,9 @@ import {
 // Import test chat (no auth required)
 import { testChatController } from "../controller/chatTest.js";
 
+// Import fast AI chat (optimized for speed)
+import { initFastChat, sendFastMessage } from "../controller/chatFast.js";
+
 const router = express.Router();
 
 router.get("/dashboard", auth, dashboard);
@@ -41,10 +44,14 @@ router.get("/shipping", auth, shipping);
 router.post("/newchat", auth, basicStartChat);
 router.post("/chatmessage", auth, basicSendMessage);
 
-// AI Chat - Advanced LangGraph + Pinecone
+// AI Chat - Advanced LangGraph + Pinecone (slower but more features)
 router.post("/ai/init", auth, initializeChatController);
 router.post("/ai/chat", auth, sendChatMessageController);
 router.get("/ai/insights", auth, getBusinessInsightsController);
+
+// Fast AI Chat - Optimized for speed (recommended)
+router.post("/ai/fast/init", auth, initFastChat);
+router.post("/ai/fast/chat", auth, sendFastMessage);
 
 // Test endpoint (no auth) - for testing AI responses
 router.post("/ai/test", testChatController);

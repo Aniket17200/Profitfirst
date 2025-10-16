@@ -67,7 +67,7 @@ const getProductCosts = async (userId) => {
   }
 };
 
-// ============ SHOPIFY BULK QUERY (EXPORTED FOR SYNC JOB) ============
+// ============ SHOPIFY QUERY (OPTIMIZED) ============
 export async function getShopifyData(apiToken, shopUrl, startDate, endDate) {
   const endpoint = `https://${shopUrl}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
   const headers = {
@@ -81,6 +81,75 @@ export async function getShopifyData(apiToken, shopUrl, startDate, endDate) {
 
   const filter = `created_at:>='${startISO}' AND created_at:<='${endISO}'`;
 
+  // Calculate date range in days
+  const daysDiff = Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24));
+  
+  // Use simple query for short ranges (< 15 days), bulk for longer
+  if (daysDiff <= 14) {
+    console.log(`[SHOPIFY] Using simple query for ${daysDiff} days`);
+    return await getShopifyDataSimple(endpoint, headers, filter);
+  } else {
+    console.log(`[SHOPIFY] Using bulk query for ${daysDiff} days`);
+    return await getShopifyDataBulk(endpoint, headers, filter);
+  }
+}
+
+// Simple GraphQL query (faster for small date ranges)
+async function getShopifyDataSimple(endpoint, headers, filter) {
+  try {
+    const query = `{
+      orders(first: 250, query: "${escapeForGql(filter)}") {
+        edges {
+          node {
+            id
+            createdAt
+            totalPriceSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            customer {
+              id
+            }
+            lineItems(first: 50) {
+              edges {
+                node {
+                  quantity
+                  product {
+                    id
+                    title
+                  }
+                }
+              }
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }`;
+
+    const response = await axios.post(endpoint, { query }, { headers, timeout: 15000 });
+    
+    if (response.data?.errors) {
+      console.error("Shopify GraphQL errors:", response.data.errors);
+      throw new Error("Shopify query failed");
+    }
+
+    const orders = response.data?.data?.orders?.edges?.map(e => e.node) || [];
+    console.log(`[SHOPIFY] ✓ Fetched ${orders.length} orders`);
+    return orders;
+  } catch (err) {
+    console.error("Shopify Simple Query Error:", err.message);
+    throw new Error("Shopify query failed");
+  }
+}
+
+// Bulk query (for large date ranges)
+async function getShopifyDataBulk(endpoint, headers, filter) {
   try {
     await ensureNoActiveBulkOperation(endpoint, headers);
     const bulkQuery = `{ orders(query: "${escapeForGql(
@@ -159,50 +228,71 @@ export async function getShopifyData(apiToken, shopUrl, startDate, endDate) {
         lineItems: { edges },
       });
     }
+    console.log(`[SHOPIFY] ✓ Bulk query fetched ${orders.length} orders`);
     return orders;
   } catch (err) {
-    console.error("Shopify Error:", err.message);
+    console.error("Shopify Bulk Error:", err.message);
     throw new Error("Shopify bulk query failed");
   }
 }
 
 // Shopify bulk helpers
 async function ensureNoActiveBulkOperation(endpoint, headers) {
-  const op = await getCurrentBulkOperation(endpoint, headers);
-  if (op && ["CREATED", "RUNNING", "CANCELING"].includes(op.status)) {
-    await safeCancelBulk(endpoint, headers, op.id);
-    let retries = 0;
-    while (true) {
-      const cur = await getCurrentBulkOperation(endpoint, headers);
-      if (!cur || ["FAILED", "CANCELED", "COMPLETED"].includes(cur.status))
-        break;
-      await sleep(Math.min(1000 * 2 ** retries, 16000));
-      retries++;
+  try {
+    const op = await getCurrentBulkOperation(endpoint, headers);
+    if (op && ["CREATED", "RUNNING", "CANCELING"].includes(op.status)) {
+      console.log(`[SHOPIFY] Canceling existing bulk operation: ${op.status}`);
+      await safeCancelBulk(endpoint, headers, op.id);
+      let retries = 0;
+      const maxRetries = 10;
+      while (retries < maxRetries) {
+        await sleep(2000);
+        const cur = await getCurrentBulkOperation(endpoint, headers);
+        if (!cur || ["FAILED", "CANCELED", "COMPLETED"].includes(cur.status)) {
+          console.log(`[SHOPIFY] ✓ Previous operation cleared: ${cur?.status || 'none'}`);
+          break;
+        }
+        retries++;
+      }
+      if (retries >= maxRetries) {
+        throw new Error("Failed to clear previous bulk operation");
+      }
     }
+  } catch (err) {
+    console.error("[SHOPIFY] Error clearing bulk operation:", err.message);
+    throw err;
   }
 }
 async function startBulkWithRetry(endpoint, headers, gql) {
   let retries = 0;
-  while (retries < 3) {
+  const maxRetries = 3;
+  while (retries < maxRetries) {
     try {
+      console.log(`[SHOPIFY] Starting bulk operation (attempt ${retries + 1}/${maxRetries})...`);
       const res = await axios.post(
         endpoint,
         {
           query: `mutation { bulkOperationRunQuery(query: """${gql}""") { bulkOperation { id status } userErrors { message } } }`,
         },
-        { headers }
+        { headers, timeout: 10000 }
       );
       const errs = res.data?.data?.bulkOperationRunQuery?.userErrors || [];
-      if (!errs.length) return;
+      if (!errs.length) {
+        console.log(`[SHOPIFY] ✓ Bulk operation started`);
+        return;
+      }
       if (errs[0].message.includes("already in progress")) {
+        console.log(`[SHOPIFY] Bulk operation already in progress, clearing...`);
         retries++;
         await ensureNoActiveBulkOperation(endpoint, headers);
+        await sleep(2000);
         continue;
       }
       throw new Error(errs.map((e) => e.message).join("; "));
     } catch (err) {
       if (axios.isAxiosError(err) && err.response?.status === 429) {
-        await sleep(2000 * (retries + 1));
+        console.log(`[SHOPIFY] Rate limited, waiting...`);
+        await sleep(3000 * (retries + 1));
         retries++;
         continue;
       }
@@ -213,15 +303,29 @@ async function startBulkWithRetry(endpoint, headers, gql) {
 }
 async function pollForBulkUrl(endpoint, headers) {
   let retries = 0;
-  while (true) {
+  const maxRetries = 30; // Max 30 attempts (about 2 minutes)
+  while (retries < maxRetries) {
     const op = await getCurrentBulkOperation(endpoint, headers);
-    if (!op) throw new Error("No bulk op");
-    if (op.status === "COMPLETED") return op.url || op.partialDataUrl;
-    if (["FAILED", "CANCELED"].includes(op.status))
-      throw new Error("Bulk failed/canceled");
-    await sleep(Math.min(2000 * 1.5 ** retries, 8000));
+    if (!op) throw new Error("No bulk operation found");
+    
+    if (op.status === "COMPLETED") {
+      console.log(`[SHOPIFY] ✓ Bulk operation completed`);
+      return op.url || op.partialDataUrl;
+    }
+    
+    if (["FAILED", "CANCELED"].includes(op.status)) {
+      console.error(`[SHOPIFY] Bulk operation ${op.status}: ${op.errorCode || 'Unknown error'}`);
+      throw new Error(`Bulk ${op.status.toLowerCase()}`);
+    }
+    
+    if (retries % 5 === 0) {
+      console.log(`[SHOPIFY] Waiting for bulk operation... (${op.status})`);
+    }
+    
+    await sleep(Math.min(2000 * 1.5 ** Math.min(retries, 5), 8000));
     retries++;
   }
+  throw new Error("Bulk operation timeout - took too long");
 }
 async function getCurrentBulkOperation(endpoint, headers) {
   const res = await axios.post(
@@ -277,55 +381,93 @@ export const dashboard = async (req, res) => {
     startDate = toISTDate(startDate);
     endDate = toISTDate(endDate);
 
-    // Check if we need to refresh data
+    // Check if we need to refresh data (reduced to 15 minutes for faster updates)
     const shouldRefresh = await DataCacheService.shouldRefresh(
       user._id,
       'dashboard_summary',
       startDate,
-      endDate
+      endDate,
+      15 // 15 minutes cache
     );
 
     let shopifyOrders, metaOverview, metaDaily, shiprocket;
 
     if (shouldRefresh) {
-      console.log(`[DASHBOARD] Fetching fresh data for user ${user._id}...`);
+      console.log(`[DASHBOARD] ⚡ Fetching fresh data for user ${user._id}...`);
+      const startTime = Date.now();
       
-      // Fetch from APIs
+      // Fetch from APIs with timeout protection
       const [shopifyRes, metaOverviewRes, metaDailyRes, shiprocketRes] =
         await Promise.allSettled([
-          getShopifyData(SHOPIFY_TOKEN, SHOP, startDate, endDate),
-          fetchMetaOverview(META_TOKEN, AD_ACCOUNT_ID, startDate, endDate),
-          fetchMetaDaily(META_TOKEN, AD_ACCOUNT_ID, startDate, endDate),
-          getShiprocketData(SHIPROCKET_TOKEN, startDate, endDate),
+          Promise.race([
+            getShopifyData(SHOPIFY_TOKEN, SHOP, startDate, endDate),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Shopify timeout')), 30000))
+          ]),
+          Promise.race([
+            fetchMetaOverview(META_TOKEN, AD_ACCOUNT_ID, startDate, endDate),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Meta timeout')), 10000))
+          ]),
+          Promise.race([
+            fetchMetaDaily(META_TOKEN, AD_ACCOUNT_ID, startDate, endDate),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Meta daily timeout')), 10000))
+          ]),
+          Promise.race([
+            getShiprocketData(SHIPROCKET_TOKEN, startDate, endDate),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Shiprocket timeout')), 10000))
+          ]),
         ]);
 
       if (shopifyRes.status === "rejected") {
-        throw new Error("Shopify data failed, try shorter date range");
+        console.error(`[DASHBOARD] ❌ Shopify failed: ${shopifyRes.reason?.message}`);
+        
+        // Try to get cached data as fallback
+        const cachedShopify = await DataCacheService.get(user._id, 'shopify_orders', startDate, endDate);
+        if (cachedShopify && cachedShopify.length > 0) {
+          console.log(`[DASHBOARD] ⚡ Using cached Shopify data as fallback`);
+          shopifyOrders = cachedShopify;
+        } else {
+          // If no cache, try with a shorter date range (last 7 days)
+          const today = new Date();
+          const sevenDaysAgo = new Date(today);
+          sevenDaysAgo.setDate(today.getDate() - 6);
+          const shortStartDate = toYMD(sevenDaysAgo);
+          const shortEndDate = toYMD(today);
+          
+          console.log(`[DASHBOARD] ⚡ Retrying with shorter range: ${shortStartDate} to ${shortEndDate}`);
+          try {
+            shopifyOrders = await getShopifyData(SHOPIFY_TOKEN, SHOP, shortStartDate, shortEndDate);
+            console.log(`[DASHBOARD] ✓ Fetched ${shopifyOrders.length} orders with shorter range`);
+          } catch (retryErr) {
+            console.error(`[DASHBOARD] ❌ Retry also failed: ${retryErr.message}`);
+            shopifyOrders = [];
+          }
+        }
+      } else {
+        shopifyOrders = shopifyRes.value;
       }
 
-      shopifyOrders = shopifyRes.value;
       metaOverview = metaOverviewRes.status === "fulfilled" ? metaOverviewRes.value : {};
       metaDaily = metaDailyRes.status === "fulfilled" ? metaDailyRes.value : [];
       shiprocket = shiprocketRes.status === "fulfilled"
         ? shiprocketRes.value
         : { totalShippingCost: 0, dailyShippingCosts: new Map(), shipping: [] };
 
-      // Save to cache
-      try {
-        await Promise.all([
-          DataCacheService.set(user._id, 'shopify_orders', startDate, endDate, shopifyOrders),
-          DataCacheService.set(user._id, 'meta_ads', startDate, endDate, { overview: metaOverview, daily: metaDaily }),
-          DataCacheService.set(user._id, 'shiprocket', startDate, endDate, shiprocket)
-        ]);
-        console.log(`[DASHBOARD] ✓ All data cached successfully for user ${user._id}`);
-      } catch (cacheError) {
-        console.error(`[DASHBOARD] ✗ Cache save error:`, cacheError.message);
-        // Continue anyway - we have the data to return
-      }
+      console.log(`[DASHBOARD] ⚡ Data fetched in ${Date.now() - startTime}ms`);
+
+      // Save to cache asynchronously (don't wait)
+      Promise.all([
+        DataCacheService.set(user._id, 'shopify_orders', startDate, endDate, shopifyOrders),
+        DataCacheService.set(user._id, 'meta_ads', startDate, endDate, { overview: metaOverview, daily: metaDaily }),
+        DataCacheService.set(user._id, 'shiprocket', startDate, endDate, shiprocket)
+      ]).then(() => {
+        console.log(`[DASHBOARD] ✓ Cache saved for user ${user._id}`);
+      }).catch(err => {
+        console.error(`[DASHBOARD] ✗ Cache save error:`, err.message);
+      });
     } else {
-      console.log(`[DASHBOARD] Using cached data for user ${user._id}`);
+      console.log(`[DASHBOARD] ⚡ Using cached data for user ${user._id}`);
       
-      // Get from cache
+      // Get from cache in parallel
       const [cachedShopify, cachedMeta, cachedShiprocket] = await Promise.all([
         DataCacheService.get(user._id, 'shopify_orders', startDate, endDate),
         DataCacheService.get(user._id, 'meta_ads', startDate, endDate),

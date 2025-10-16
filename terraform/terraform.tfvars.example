@@ -1,0 +1,22 @@
+# Terraform Variables Configuration
+# Copy this file to terraform.tfvars and update with your values
+
+# AWS Region (Mumbai)
+aws_region = "ap-south-1"
+
+# Application name
+app_name = "profit-first"
+
+# EC2 Instance type
+instance_type = "t3.micro"
+
+# SSH Key name (must exist in AWS)
+# Create this in AWS Console: EC2 > Key Pairs
+ssh_key_name = "profit-first-key"
+
+# Your domain name (optional)
+# Leave empty if you don't have a domain yet
+domain_name = ""
+
+# Root volume size in GB
+root_volume_size = 20

@@ -27,10 +27,20 @@ class DataAggregator {
 
     const { step2, step4, step5 } = user.onboarding;
 
+    // Add timeout protection for all API calls
     const [shopifyData, metaData, shiprocketData, productCosts] = await Promise.allSettled([
-      this.fetchShopifyData(step2?.accessToken, step2?.storeUrl, startDate, endDate),
-      this.fetchMetaData(step4?.accessToken, step4?.adAccountId, startDate, endDate),
-      this.fetchShiprocketData(step5?.token, startDate, endDate),
+      Promise.race([
+        this.fetchShopifyData(step2?.accessToken, step2?.storeUrl, startDate, endDate),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Shopify timeout')), 20000))
+      ]),
+      Promise.race([
+        this.fetchMetaData(step4?.accessToken, step4?.adAccountId, startDate, endDate),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Meta timeout')), 10000))
+      ]),
+      Promise.race([
+        this.fetchShiprocketData(step5?.token, startDate, endDate),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Shiprocket timeout')), 10000))
+      ]),
       this.getProductCosts(user._id),
     ]);
 

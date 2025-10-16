@@ -20,7 +20,31 @@ const ChatBot = ({ onAnalysisComplete, onClose }) => {
         setIsLoading(true);
         setError(null);
 
-        // Try new AI system first
+        // Try fast AI system first (optimized for speed)
+        try {
+          const { data: initData } = await axiosInstance.post("/data/ai/fast/init");
+          
+          if (initData.success) {
+            setChatSession({ 
+              useFastAI: true, 
+              sessionId: initData.sessionId 
+            });
+            setMessages([
+              {
+                sender: "bot",
+                text: initData.message || "👋 Hi! I'm your Profit First AI assistant.\n\nI can help you understand your business metrics, identify opportunities, and provide actionable insights based on your actual data.\n\nWhat would you like to know?",
+                isAnalysis: true,
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+            setIsLoading(false);
+            return;
+          }
+        } catch (fastAIError) {
+          console.warn("Fast AI unavailable, trying advanced AI:", fastAIError.message);
+        }
+
+        // Try advanced AI system
         try {
           const { data: initData } = await axiosInstance.post("/data/ai/init");
           
@@ -38,7 +62,7 @@ const ChatBot = ({ onAnalysisComplete, onClose }) => {
             return;
           }
         } catch (aiError) {
-          console.warn("New AI system unavailable, falling back to basic chat:", aiError.message);
+          console.warn("Advanced AI unavailable, falling back to basic chat:", aiError.message);
         }
 
         // Fallback to old system
@@ -94,8 +118,24 @@ const ChatBot = ({ onAnalysisComplete, onClose }) => {
     try {
       let replyPayload;
 
-      // Use new AI system if available
-      if (chatSession.useNewAI) {
+      // Use fast AI system if available (fastest)
+      if (chatSession.useFastAI) {
+        const { data } = await axiosInstance.post("/data/ai/fast/chat", {
+          sessionId: chatSession.sessionId,
+          message: currentInput,
+        });
+        
+        if (data.success) {
+          replyPayload = {
+            reply: data.reply,
+            responseTime: data.responseTime,
+          };
+        } else {
+          throw new Error(data.error || "AI response failed");
+        }
+      }
+      // Use advanced AI system if available
+      else if (chatSession.useNewAI) {
         const { data } = await axiosInstance.post("/data/ai/chat", {
           message: currentInput,
         });
@@ -126,6 +166,7 @@ const ChatBot = ({ onAnalysisComplete, onClose }) => {
         isAnalysis: true,
         timestamp: new Date().toISOString(),
         metadata: replyPayload.metadata,
+        responseTime: replyPayload.responseTime,
       };
 
       setMessages((prev) => [...prev, botMessage]);

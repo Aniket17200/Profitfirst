@@ -52,7 +52,7 @@ USE THESE EXACT NUMBERS ABOVE - DO NOT CALCULATE FROM DAILY DATA!
 
     const assistant = await openai.beta.assistants.create({
       name: "Profit First Analytics",
-      model: "gpt-4-turbo-preview",
+      model: "gpt-3.5-turbo", // Faster model
       instructions: `You are Profit First, a friendly AI analytics assistant for Indian D2C brands.
 
 ${summaryText}

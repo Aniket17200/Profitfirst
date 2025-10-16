@@ -8,53 +8,41 @@ class AIOrchestrator {
   constructor() {
     this.llm = new ChatOpenAI({
       openAIApiKey: process.env.OPENAI_API_KEY,
-      modelName: 'gpt-4-turbo-preview',
-      temperature: 0.2, // Very low temperature for precise, focused responses
-      maxTokens: 300, // Shorter responses - be concise
+      modelName: 'gpt-3.5-turbo', // Faster model for quick responses
+      temperature: 0.1, // Very low temperature for precise, focused responses
+      maxTokens: 250, // Shorter responses - be concise
     });
   }
 
   async analyzeQuery(state) {
-    const { query, userId } = state;
+    // Skip complex analysis - use simple keyword matching for speed
+    const { query } = state;
+    const lowerQuery = query.toLowerCase();
     
-    const analysisPrompt = `Analyze this business analytics query and determine:
-1. Query type (metrics, trends, predictions, recommendations, comparison)
-2. Time period mentioned (if any)
-3. Specific metrics requested
-4. Intent (what user wants to know)
-
-Query: "${query}"
-
-Respond in JSON format with: { type, timePeriod, metrics, intent }`;
-
-    const response = await this.llm.invoke([
-      new SystemMessage('You are a business analytics query analyzer.'),
-      new HumanMessage(analysisPrompt),
-    ]);
-
-    let analysis;
-    try {
-      analysis = JSON.parse(response.content);
-    } catch {
-      analysis = {
-        type: 'general',
-        timePeriod: 'current',
-        metrics: [],
-        intent: query,
-      };
+    let type = 'general';
+    if (lowerQuery.includes('predict') || lowerQuery.includes('forecast') || lowerQuery.includes('next') || lowerQuery.includes('will')) {
+      type = 'predictions';
+    } else if (lowerQuery.includes('trend') || lowerQuery.includes('compare')) {
+      type = 'trends';
+    } else if (lowerQuery.includes('recommend') || lowerQuery.includes('suggest') || lowerQuery.includes('improve')) {
+      type = 'recommendations';
+    } else if (lowerQuery.includes('revenue') || lowerQuery.includes('profit') || lowerQuery.includes('orders') || lowerQuery.includes('roas')) {
+      type = 'metrics';
     }
+
+    const analysis = {
+      type,
+      timePeriod: 'current',
+      metrics: [],
+      intent: query,
+    };
 
     return { ...state, analysis };
   }
 
   async fetchContext(state) {
-    const { query, userId, analysis } = state;
-    
-    const contextDocs = await vectorStore.queryContext(userId, query, 10);
-    
-    const context = contextDocs.map(doc => doc.content).join('\n\n');
-    
-    return { ...state, context, contextDocs };
+    // Skip vector store for speed - use only business data
+    return { ...state, context: '', contextDocs: [] };
   }
 
   async generateResponse(state) {
