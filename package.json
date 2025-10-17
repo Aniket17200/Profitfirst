@@ -6,7 +6,11 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "pinecone:init": "node scripts/initPinecone.js",
+    "pinecone:sync": "node scripts/syncAllDataToPinecone.js",
+    "pinecone:test": "node scripts/testPineconeAI.js",
+    "pinecone:setup": "npm run pinecone:init && npm run pinecone:sync"
   },
   "dependencies": {
     "@google-analytics/data": "^5.1.0",

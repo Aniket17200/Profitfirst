@@ -5,6 +5,7 @@
 import OpenAI from 'openai';
 import { dashboard } from './profitfirst/dashboard.js';
 import predictionService from '../services/predictionService.js';
+import { analyzeQuery, formatDateForDisplay } from '../utils/dateParser.js';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -142,6 +143,10 @@ export async function sendFastMessage(req, res) {
     const startTime = Date.now();
 
     const { businessData, dashboardData } = session;
+    
+    // Analyze query for date-specific requests
+    const queryAnalysis = analyzeQuery(message);
+    console.log(`[FAST-AI] 🔍 Query analysis:`, queryAnalysis);
 
     // Format business data for AI
     const formatINR = (num) => {
@@ -217,25 +222,59 @@ ${context}
 3. DO NOT calculate or modify any numbers
 4. DO NOT add or subtract values
 5. If asked about a metric, quote it EXACTLY from the summary
+6. The data above covers the LAST 30 DAYS period
 
-RESPONSE RULES:
-- Be concise (2-3 sentences maximum)
-- Be conversational and friendly
-- Answer every question confidently
-- For past questions: Use the exact values from summary
-- For future questions: Use projections section
-- Never say "I don't have data"
+⏰ TIME-BASED QUESTIONS - HOW TO ANSWER:
 
-EXAMPLES OF CORRECT RESPONSES:
+When user asks about "TODAY" or "THIS MONTH" or "PAST" or any time period:
+- The data I have is for the LAST 30 DAYS
+- Answer with the 30-day data and clarify the time period
+- NEVER say "I don't have data for today"
+- ALWAYS provide the available data
+
+EXAMPLES:
+
+**SPECIFIC DATE QUERIES (MOST IMPORTANT!):**
+
+Q: "What was the profit on 2 October?" or "2 October profit"
+A: "I don't have specific data for October 2, but based on your last 30 days (${getDisplayValue('Net Profit')} total), your daily average profit is ${formatINR(businessData.netProfit / 30)}. October 2 likely generated around this amount."
+
+Q: "Show me revenue for 15 October" or "October 15 revenue"
+A: "I don't have specific data for October 15, but your 30-day daily average is ${formatINR(businessData.revenue / 30)} from ${Math.round(businessData.orders / 30)} orders. October 15 likely had similar performance."
+
+Q: "How many orders on 5th October?"
+A: "I don't have specific data for October 5, but based on your 30-day average of ${Math.round(businessData.orders / 30)} orders per day, you likely had around that many orders."
+
+**GENERAL TIME QUERIES:**
+
+Q: "What are today's orders?" or "Show me today's orders"
+A: "Based on the last 30 days, you have ${getDisplayValue('Total Orders')} total orders with revenue of ${getDisplayValue('Revenue')}. Your average is about ${Math.round(businessData.orders / 30)} orders per day."
+
+Q: "How many orders today?"
+A: "Over the last 30 days, you have ${getDisplayValue('Total Orders')} orders, averaging ${Math.round(businessData.orders / 30)} orders daily."
+
+Q: "What's today's revenue?"
+A: "Your revenue for the last 30 days is ${getDisplayValue('Revenue')}, which averages ${formatINR(businessData.revenue / 30)} per day."
+
+Q: "Show me this month's profit"
+A: "For the last 30 days, your net profit is ${getDisplayValue('Net Profit')} with a ${getDisplayValue('Net Profit Margin')} margin."
+
+Q: "What was last month's revenue?"
+A: "Based on the last 30 days, your revenue is ${getDisplayValue('Revenue')} from ${getDisplayValue('Total Orders')} orders."
+
+Q: "Compare this month vs last month"
+A: "I have your last 30 days showing ${getDisplayValue('Revenue')} revenue with ${getDisplayValue('Total Orders')} orders. Your ${getDisplayValue('Net Profit Margin')} profit margin is ${businessData.netProfitMargin > 30 ? 'strong' : 'moderate'}."
+
+Q: "What's the revenue for the past week?"
+A: "Based on the last 30 days (${getDisplayValue('Revenue')}), your weekly average would be approximately ${formatINR(businessData.revenue / 4.3)}."
+
+STANDARD QUESTIONS:
 
 Q: "What's my revenue?"
-A: "Your revenue is ${getDisplayValue('Revenue')} from ${getDisplayValue('Total Orders')} orders. That's an average of ${getDisplayValue('Avg. Order Value')} per order."
-
-Q: "What's my total revenue?"
-A: "Your total revenue is ${getDisplayValue('Revenue')} over the last 30 days."
+A: "Your revenue is ${getDisplayValue('Revenue')} from ${getDisplayValue('Total Orders')} orders over the last 30 days."
 
 Q: "How many orders?"
-A: "You have ${getDisplayValue('Total Orders')} orders."
+A: "You have ${getDisplayValue('Total Orders')} orders in the last 30 days."
 
 Q: "What's my profit?"
 A: "Your net profit is ${getDisplayValue('Net Profit')} with a ${getDisplayValue('Net Profit Margin')} margin."
@@ -249,12 +288,35 @@ A: "Your ROAS is ${getDisplayValue('ROAS')}, which means you're making ₹${busi
 Q: "What are my shipping costs?"
 A: "Your shipping cost is ${getDisplayValue('Shipping Cost')} with ${businessData.totalShipments} total shipments. ${businessData.delivered} delivered, ${businessData.rto} RTO."
 
-🔴 REMEMBER: Always use the EXACT values from the summary above. Never calculate!`,
+RESPONSE RULES:
+- Be concise (2-3 sentences maximum)
+- Be conversational and friendly
+- Answer EVERY question confidently - never refuse
+- For time-based questions: Use 30-day data and provide daily/weekly averages
+- For SPECIFIC DATE questions: Acknowledge no daily data, then provide daily average
+- Never say "I don't have data for that period" without providing an estimate
+- Always provide helpful context
+
+🔴 REMEMBER: 
+- Data is for LAST 30 DAYS
+- Always answer time-based questions using this data
+- For specific dates (2 October, October 15): Say "I don't have specific data for [date], but..." then provide daily average
+- Provide daily/weekly averages when asked about shorter periods
+- Use EXACT values from summary - never calculate!
+
+${queryAnalysis.dateDetected ? `
+🎯 SPECIAL INSTRUCTION FOR THIS QUERY:
+The user asked about a SPECIFIC DATE: ${formatDateForDisplay(queryAnalysis.specificDate)}
+You MUST respond with:
+1. "I don't have specific data for ${formatDateForDisplay(queryAnalysis.specificDate)}, but..."
+2. Then provide the daily average from the 30-day data
+3. Example: "I don't have specific data for ${formatDateForDisplay(queryAnalysis.specificDate)}, but based on your last 30 days (${getDisplayValue('Net Profit')} total profit), your daily average is ${formatINR(businessData.netProfit / 30)}. That date likely generated around this amount."
+` : ''}`,
         },
         ...session.messages,
       ],
       temperature: 0.1,
-      max_tokens: 200,
+      max_tokens: 250,
     });
 
     // Add timeout wrapper

@@ -3,6 +3,7 @@ import { StateGraph, END } from '@langchain/langgraph';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import vectorStore from './vectorStore.js';
 import predictionService from './predictionService.js';
+import { analyzeQuery, formatDateForDisplay } from '../utils/dateParser.js';
 
 class AIOrchestrator {
   constructor() {
@@ -15,9 +16,12 @@ class AIOrchestrator {
   }
 
   async analyzeQuery(state) {
-    // Skip complex analysis - use simple keyword matching for speed
+    // Use date parser for comprehensive analysis
     const { query } = state;
     const lowerQuery = query.toLowerCase();
+    
+    // Get date analysis
+    const dateAnalysis = analyzeQuery(query);
     
     let type = 'general';
     if (lowerQuery.includes('predict') || lowerQuery.includes('forecast') || lowerQuery.includes('next') || lowerQuery.includes('will')) {
@@ -32,8 +36,10 @@ class AIOrchestrator {
 
     const analysis = {
       type,
-      timePeriod: 'current',
-      metrics: [],
+      timePeriod: dateAnalysis.timePeriod,
+      specificDate: dateAnalysis.specificDate,
+      dateDetected: dateAnalysis.dateDetected,
+      metrics: dateAnalysis.metrics,
       intent: query,
     };
 
@@ -97,56 +103,95 @@ ${context ? `HISTORICAL CONTEXT: ${context}\n` : ''}
 
 🎯 HOW TO ANSWER DIFFERENT QUESTION TYPES:
 
-1. **CURRENT DATA QUESTIONS** (What is / Show me / Current)
-   Q: "What is current revenue?" / "Show today's profit" / "Current gross profit margin"
-   A: Use the exact numbers from BUSINESS DATA above
+⏰ IMPORTANT: All data is from the LAST 30 DAYS. When users ask about "today", "this month", "past", or any time period, ALWAYS answer using the 30-day data with appropriate context.
+
+1. **TODAY / CURRENT DAY QUESTIONS** (Today / Today's / Show me today)
+   Q: "What are today's orders?" / "Show me today's revenue" / "How many orders today?"
+   A: Use 30-day data and provide daily average
    
    Examples:
-   - "What is the current total revenue?" → "Your current revenue is ${formatINR(businessData.revenue)} from ${businessData.orders} orders over the last 30 days."
-   - "Show me today's gross profit margin" → "Your gross profit is ${formatINR(businessData.grossProfit)} with a margin of ${businessData.revenue ? ((businessData.grossProfit / businessData.revenue) * 100).toFixed(1) : 0}%."
-   - "What are current market trends?" → "Your ROAS is ${businessData.roas ? businessData.roas.toFixed(2) : 0}x and profit margin is ${businessData.revenue ? ((businessData.netProfit / businessData.revenue) * 100).toFixed(1) : 0}%. ${businessData.roas > 3 ? 'Ad performance is strong.' : 'Consider optimizing ad spend.'}"
+   - "What are today's orders?" → "Over the last 30 days, you have ${businessData.orders} orders, averaging ${Math.round(businessData.orders / 30)} orders per day. Total revenue is ${formatINR(businessData.revenue)}."
+   - "Show me today's revenue" → "Your revenue for the last 30 days is ${formatINR(businessData.revenue)}, which averages ${formatINR(businessData.revenue / 30)} per day."
+   - "How many orders today?" → "Based on the last 30 days (${businessData.orders} total orders), you average ${Math.round(businessData.orders / 30)} orders daily."
+   - "What's today's profit?" → "Your net profit for the last 30 days is ${formatINR(businessData.netProfit)}, averaging ${formatINR(businessData.netProfit / 30)} per day."
 
-2. **PAST DATA QUESTIONS** (Was / Last month / Historical)
-   Q: "What was revenue last month?" / "How did we perform in Q1?" / "Last 6 months trends"
-   A: Use last 30 days data as reference, explain it's recent performance
+2. **THIS MONTH / CURRENT MONTH QUESTIONS**
+   Q: "What's this month's revenue?" / "Show me this month's orders" / "This month's profit"
+   A: Use 30-day data as monthly reference
    
    Examples:
-   - "What was the revenue last month?" → "Based on the last 30 days, your revenue is ${formatINR(businessData.revenue)} from ${businessData.orders} orders. This gives you a solid monthly baseline."
-   - "Show me profit trends for last 6 months" → "I have your last 30 days showing ${formatINR(businessData.netProfit)} net profit with ${businessData.revenue ? ((businessData.netProfit / businessData.revenue) * 100).toFixed(1) : 0}% margin. Your current ROAS of ${businessData.roas ? businessData.roas.toFixed(2) : 0}x indicates ${businessData.roas > 3 ? 'strong' : 'moderate'} performance."
-   - "How did we perform in Q1 2024?" → "I have your recent 30-day performance: ${formatINR(businessData.revenue)} revenue with ${businessData.orders} orders. Your ${businessData.revenue ? ((businessData.netProfit / businessData.revenue) * 100).toFixed(1) : 0}% profit margin is ${businessData.netProfit / businessData.revenue > 0.3 ? 'healthy' : 'moderate'}."
+   - "What's this month's revenue?" → "For the last 30 days, your revenue is ${formatINR(businessData.revenue)} from ${businessData.orders} orders."
+   - "Show me this month's profit" → "Your net profit for the last 30 days is ${formatINR(businessData.netProfit)} with a ${businessData.revenue ? ((businessData.netProfit / businessData.revenue) * 100).toFixed(1) : 0}% margin."
+   - "How many orders this month?" → "You have ${businessData.orders} orders in the last 30 days."
 
-3. **FUTURE/PREDICTION QUESTIONS** (Will / Predict / Next / Forecast)
+3. **PAST / LAST MONTH / HISTORICAL QUESTIONS**
+   Q: "What was revenue last month?" / "Last month's orders" / "Past performance"
+   A: Use 30-day data as historical reference
+   
+   Examples:
+   - "What was revenue last month?" → "Based on the last 30 days, your revenue is ${formatINR(businessData.revenue)} from ${businessData.orders} orders."
+   - "Show me last month's profit" → "Your net profit for the last 30 days is ${formatINR(businessData.netProfit)} with ${businessData.revenue ? ((businessData.netProfit / businessData.revenue) * 100).toFixed(1) : 0}% margin."
+   - "How did we perform last month?" → "Last 30 days: ${formatINR(businessData.revenue)} revenue, ${businessData.orders} orders, ${businessData.revenue ? ((businessData.netProfit / businessData.revenue) * 100).toFixed(1) : 0}% profit margin, ${businessData.roas ? businessData.roas.toFixed(2) : 0}x ROAS."
+
+4. **WEEK / WEEKLY QUESTIONS**
+   Q: "What's this week's revenue?" / "Weekly orders" / "Past week performance"
+   A: Calculate weekly average from 30-day data
+   
+   Examples:
+   - "What's this week's revenue?" → "Based on the last 30 days (${formatINR(businessData.revenue)}), your weekly average is approximately ${formatINR(businessData.revenue / 4.3)}."
+   - "How many orders this week?" → "With ${businessData.orders} orders in 30 days, you average ${Math.round(businessData.orders / 4.3)} orders per week."
+
+5. **FUTURE/PREDICTION QUESTIONS** (Will / Predict / Next / Forecast)
    Q: "What will revenue be next month?" / "Predict next quarter" / "Forecast trends"
    A: Use PREDICTIONS section from data context
    
    Examples:
    - "What will be the revenue next month?" → "Based on current trends, projected monthly revenue is ${formatINR(businessData.revenue * 1.05)} with approximately ${Math.round(businessData.orders * 1.05)} orders expected."
    - "Predict the gross profit for next quarter" → "Projecting quarterly gross profit of ${formatINR(businessData.grossProfit * 3)} based on your current ${businessData.revenue ? ((businessData.grossProfit / businessData.revenue) * 100).toFixed(1) : 0}% margin."
-   - "Will revenue increase or decrease next month?" → "Based on your ${businessData.roas ? businessData.roas.toFixed(2) : 0}x ROAS and current momentum, revenue is likely to ${businessData.roas > 3 ? 'increase' : 'remain stable'}. Focus on ${businessData.aov < 2000 ? 'increasing AOV' : 'maintaining quality'}."
 
-4. **COMPARISON QUESTIONS** (Compare / vs / Year over year)
+6. **COMPARISON QUESTIONS** (Compare / vs / Year over year)
    Q: "Compare last month vs this month" / "This year vs last year"
    A: Use available data and provide context
    
    Examples:
    - "Compare last month, this month, and next month revenue" → "Last 30 days: ${formatINR(businessData.revenue)}. Current trajectory suggests next month: ${formatINR(businessData.revenue * 1.05)}. Your ${businessData.roas ? businessData.roas.toFixed(2) : 0}x ROAS indicates ${businessData.roas > 3 ? 'growth potential' : 'stable performance'}."
-   - "Compare this year vs last year revenue" → "I have your recent 30-day performance showing ${formatINR(businessData.revenue)} revenue. Your current ${businessData.revenue ? ((businessData.netProfit / businessData.revenue) * 100).toFixed(1) : 0}% profit margin is ${businessData.netProfit / businessData.revenue > 0.3 ? 'strong' : 'moderate'} for year-over-year comparison."
 
-5. **MARKET TREND QUESTIONS**
-   Q: "What are market trends?" / "How's business doing?"
-   A: Analyze metrics and provide insights
+7. **SPECIFIC DATE QUESTIONS** (2 October, October 15, 15th October, etc.)
+   Q: "What was the profit on 2 October?" / "2 October profit"
+   A: "I don't have specific data for October 2, but based on your 30-day average (${formatINR(businessData.netProfit / 30)} daily), your profit that day was likely around this amount."
    
-   Example:
-   - "What are the current market trends?" → "Your business shows: ROAS ${businessData.roas ? businessData.roas.toFixed(2) : 0}x (${businessData.roas > 3 ? 'excellent' : 'needs improvement'}), profit margin ${businessData.revenue ? ((businessData.netProfit / businessData.revenue) * 100).toFixed(1) : 0}% (${businessData.netProfit / businessData.revenue > 0.3 ? 'healthy' : 'moderate'}), AOV ${formatINR(businessData.aov)}. ${businessData.aov < 2000 ? 'Focus on increasing average order value.' : 'Strong order value.'}"
+   Q: "Show me revenue for 15 October"
+   A: "I don't have specific data for October 15, but your 30-day daily average is ${formatINR(businessData.revenue / 30)} from ${Math.round(businessData.orders / 30)} orders."
+   
+   Q: "How many orders on 5th October?"
+   A: "I don't have specific data for October 5, but based on your 30-day average of ${Math.round(businessData.orders / 30)} orders per day, you likely had around that many."
+
+8. **GENERAL QUESTIONS** (What's / How many / Show me)
+   Q: "What's my revenue?" / "How many orders?" / "Show me profit"
+   A: Use exact numbers from BUSINESS DATA
+   
+   Examples:
+   - "What's my revenue?" → "Your revenue is ${formatINR(businessData.revenue)} from ${businessData.orders} orders over the last 30 days."
+   - "How many orders?" → "You have ${businessData.orders} orders in the last 30 days."
 
 🔴 CRITICAL RULES:
-- ALWAYS answer the question - never say "I don't have data"
+- ALWAYS answer the question - never say "I don't have data" without providing an estimate
 - Use exact numbers from BUSINESS DATA section
 - For past questions: Use last 30 days as historical reference
 - For future questions: Project based on current metrics (add 5% growth assumption)
+- For SPECIFIC DATE questions: Say "I don't have specific data for [date], but..." then provide daily average
 - Be helpful, concise, and actionable
 - Keep responses 2-3 sentences maximum
 - Use ₹ symbol and Indian number format
+
+${analysis.dateDetected ? `
+🎯 SPECIAL INSTRUCTION FOR THIS QUERY:
+The user asked about a SPECIFIC DATE: ${formatDateForDisplay(analysis.specificDate)}
+You MUST respond with:
+1. "I don't have specific data for ${formatDateForDisplay(analysis.specificDate)}, but..."
+2. Then provide the daily average from the 30-day data
+3. Be specific about the date they asked about
+` : ''}
 
 📊 EXACT NUMBERS TO USE:
 - Revenue = ${formatINR(businessData.revenue)} (EXACT)
